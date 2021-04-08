@@ -13,21 +13,23 @@ This is a processing plugin for QGIS. It has several tools which can be used to 
 
 This plugin divides a river into multiple with same length :
 
--- illustration goes here -
+illustration goes here !
 
-#### Input data :
+
+
+### Input data :
 
 * a river layer, which can be polygon or line
 * an optional line layer for the river centerline, which will be used if river layer is polygon. If river layer is polygon and no centerline is set, it will be calculated
 * the length of the boxes to be created, same units as river layer
 * the width of the boxes to be created : will only be used if river layer is a line layer, otherwise width will be that of the river
 
-#### Ouput data :
+### Ouput data :
 
 * polygon layer with boxes
 * optionally, river centerline layer
 
-#### How it works
+### How it works
 
 There are 3 steps for this plugin :
 
@@ -36,7 +38,7 @@ There are 3 steps for this plugin :
 - creating Thiessen polygons for this point layer, using QGIS algorithm "Voronoi polygons"
 - clipping these polygons by the initial polygon layer, using QGIS algorithm "Clip" if input layer is polygon, or by a buffer of given width if input layer is line
 
-### Distance along river
+## Distance along river
 
 
 
