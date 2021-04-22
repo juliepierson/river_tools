@@ -33,15 +33,12 @@ __revision__ = '$Format:%H$'
 from qgis.PyQt.QtCore import (QCoreApplication,
                               QVariant)
 from qgis.core import (QgsProcessing,
-                       QgsMessageLog,
                        QgsProcessingAlgorithm,
-                       QgsProcessingParameterDistance,
                        QgsProcessingParameterVectorDestination,
                        QgsProcessingParameterFeatureSink,
                        QgsWkbTypes,
                        QgsProcessingParameterVectorLayer,
                        QgsProcessingParameterField,
-                       QgsProcessingParameterFolderDestination,
                        QgsVectorLayer,
                        QgsProject,
                        QgsCoordinateReferenceSystem,
@@ -50,7 +47,6 @@ from qgis.core import (QgsProcessing,
                        QgsFeature)
 import processing
 import pandas as pd
-from os import path, mkdir
 
 
 class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
@@ -187,10 +183,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         river = self.parameterAsVectorLayer(parameters, self.RIVER, context)
         projected1 = self.parameterAsOutputLayer(parameters, self.PROJECTED1, context)
         projected2 = self.parameterAsOutputLayer(parameters, self.PROJECTED2, context)
-        # centerline output only if river is a polygon
-        #if river.geometryType() == QgsWkbTypes.PolygonGeometry :
-        #    centerline = self.parameterAsVectorLayer(parameters, self.CENTERLINE_OUTPUT, context)
-        
         # before creating output distance table, its fields must be defined
         field_list = [['ID1', QVariant.Int], ['ID2', QVariant.Int], ['straight_dist', QVariant.Double], ['river_dist', QVariant.Double]]
         fields = QgsFields()
@@ -218,14 +210,14 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # if input layer is line, it is considered as centerline
         if river.geometryType() == QgsWkbTypes.LineGeometry:
-            message = 'river : ' + str(river)
-            feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
             centerline_layer = river
             # if centerline is composed of multiple lines, merge them
             features = centerline_layer.getFeatures()
             nb_features = sum(1 for _ in features)
             if nb_features > 1:
-                centerline_layer = self.mergeLines(centerline_layer, context, feedback)
+                centerline = self.mergeLines(centerline_layer, context, feedback)
+                centerline_layer = QgsVectorLayer(centerline, "centerline", "ogr")
+                QgsProject.instance().addMapLayer(centerline_layer)
         # if input layer is point, exit plugin
         if river.geometryType() == QgsWkbTypes.PointGeometry:
             message = 'Please choose a polygon or line layer for input river layer'
@@ -250,8 +242,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                     FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
         # run this query to create 1st projected point layer
         layer_projected1 = self.runSqlQuery(layer_list, field_list, query, 0, projected1, context, feedback)
-        #res_projected1, projected1 = self.runSqlQuery(layer_list, field_list, query, 0, 'memory:', context, feedback)
-        
         
         message = 'Preparing SQL query to project 2nd input layer on river...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
@@ -267,8 +257,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                     FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
         # run this query to create 2nd projected point layer
         layer_projected2 = self.runSqlQuery(layer_list, field_list, query, 0, projected2, context, feedback)
-        #res_projected2, projected2 = self.runSqlQuery(layer_list, field_list, query, 0, 'memory:', context, feedback)
-        
         
 #        # load layers
 #        message = 'projected1 : ' + str(type(projected1))
@@ -371,7 +359,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         skeleton_param = {'input' : polygon,
                   'smoothness' : 0.1,
                   'thin' : -1,
-                  #'output' : parameters[self.CENTERLINE_OUTPUT]} # to output this layer in QGIS as well
                   'output' : parameters[self.CENTERLINE_OUTPUT]} # to output this layer in QGIS as well
         # run voronoi.skeleton
         skeleton_result = processing.run("grass7:v.voronoi.skeleton", skeleton_param, is_child_algorithm=True, context=context, feedback=feedback)
