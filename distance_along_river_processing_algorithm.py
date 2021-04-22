@@ -30,20 +30,27 @@ __copyright__ = '(C) 2021 by J. Pierson, UMR 6554 LETG, CNRS'
 
 __revision__ = '$Format:%H$'
 
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import (QCoreApplication,
+                              QVariant)
 from qgis.core import (QgsProcessing,
                        QgsMessageLog,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterDistance,
                        QgsProcessingParameterVectorDestination,
+                       QgsProcessingParameterFeatureSink,
                        QgsWkbTypes,
                        QgsProcessingParameterVectorLayer,
                        QgsProcessingParameterField,
                        QgsProcessingParameterFolderDestination,
                        QgsVectorLayer,
-                       QgsProject)
+                       QgsProject,
+                       QgsCoordinateReferenceSystem,
+                       QgsFields,
+                       QgsField,
+                       QgsFeature)
 import processing
 import pandas as pd
+from os import path, mkdir
 
 
 class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
@@ -70,7 +77,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
     IDFIELD2 = 'IDFIELD2'
     RIVER = 'RIVER'
     PROJECTED_POINTS = 'PROJECTED_POINTS'
-    OUTPUT_FOLDER = 'OUTPUT_FOLDER'
+    OUTPUT_TABLE = 'OUTPUT_TABLE'
     CENTERLINE_OUTPUT = 'CENTERLINE_OUTPUT'
     PROJECTED1 = 'PROJECTED1'
     PROJECTED2 = 'PROJECTED2'
@@ -128,12 +135,13 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             )
         )
             
-        # output folder for CSV
+        # output table
         self.addParameter(
-            QgsProcessingParameterFolderDestination(
-                self.OUTPUT_FOLDER, 
+            QgsProcessingParameterFeatureSink(
+                self.OUTPUT_TABLE, 
                 self.tr('Output folder for CSV file with distances'),
-                None, True))
+                )
+            )
         
         # ouput centerline layer, created if input is polygon
         self.addParameter(
@@ -176,8 +184,28 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         input2 = self.parameterAsVectorLayer(parameters, self.INPUT2, context)
         idfield2 = self.parameterAsString(parameters, self.IDFIELD2, context)
         river = self.parameterAsVectorLayer(parameters, self.RIVER, context)
-        output_folder = self.parameterAsFile(parameters, self.OUTPUT_FOLDER, context)
+    
+        # before creating output table, its fields must be defined
+        field_list = [['ID1', QVariant.Int], ['ID2', QVariant.Int], ['straight_dist', QVariant.Double], ['river_dist', QVariant.Double]]
+        fields = QgsFields()
+        for fieldname, fieldtype in field_list:
+            fields.append(QgsField(fieldname, fieldtype))
+        (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT_TABLE, context, fields, QgsWkbTypes.NoGeometry, QgsCoordinateReferenceSystem())
+        
+        ## name of future CSV file (without csv extension, for ex. distance_table)
+        #csv_name = 'distance_table'
+        
+        # column names for future CSV
+        # normally, same value for 1st and 2pt ids but sometimes an id is present in only one layer
+        id1_colname = field_list[0][0] # ID of 1st point
+        id2_colname = field_list[1][0] # ID of 2nd point
+        dist_colname = field_list[2][0] # straight line distance between pair of points
+        riverdist_colname = field_list[3][0] # along-river distance between pair of projected points
        
+        
+        # 1/ PREPARATION : CREATE CENTERLINE IF NEEDED, MERGE LINES IN CENTERLINE IF NEEDED
+        ####################################################################################
+        
         # if river layer is polygon, calculate the centerline for the input layer        
         if river.geometryType() == QgsWkbTypes.PolygonGeometry :
             centerline_output = self.createCenterline(river, parameters, context, feedback)
@@ -193,27 +221,143 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             nb_features = sum(1 for _ in features)
             if nb_features > 1:
                 centerline = self.mergeLines(centerline, context, feedback)
-              
-        # create projected point layer for 1st input layer
-        projected1 = self.projectPoints(input1, idfield1, centerline, self.PROJECTED1, parameters, context, feedback)
-        # create projected point layer for 2nd input layer
-        projected2 = self.projectPoints(input2, idfield2, centerline, self.PROJECTED2, parameters, context, feedback)
+         
+            
+        # 2/ PROJECT POINTS FROM INPUT LAYERS ON RIVER CENTERLINE
+        ####################################################################################
         
-        # create dataframe with distances between pair of points
-        distance_dataframe = self.createDistanceDataframe(output_folder, projected1, projected2, idfield1, idfield2, context, feedback)
+        message = 'Preparing SQL query to project 1st input layer on river...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        # get names or full path for 1st point layer and centerline
+        layer_list = [input1, centerline]
+        call_layer_list = self.callableLayers(layer_list, feedback)
+        # id field is also needed
+        field_list = [idfield1]
+        # SQL query to get endpoints of shortest lines between points and river centerline
+        query = f"""SELECT st_endpoint(ST_ShortestLine(p.geometry, l.geometry)) as geometry,
+                    p.{field_list[0]},
+                    ROUND(ST_Length(ST_ShortestLine(p.geometry, l.geometry)), 6) AS distance
+                    FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
+        # run this query to create 1st projected point layer
+        res_projected1, projected1 = self.runSqlQuery(layer_list, field_list, query, 0, parameters[self.PROJECTED1], context, feedback)
+        #res_projected1, projected1 = self.runSqlQuery(layer_list, field_list, query, 0, 'memory:', context, feedback)
         
-        # write dataframe to CSV file
-        #self.createCsv(output_folder, distance_dataframe, context, feedback)
         
-        # Return the results of the algorithm : projected points layers, centerline layer if wanted
+        message = 'Preparing SQL query to project 2nd input layer on river...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        # get names or full path for 2nd point layer and centerline
+        layer_list = [input2, centerline]
+        call_layer_list = self.callableLayers(layer_list, feedback)
+        # id field is also needed
+        field_list = [idfield2]
+        # SQL query to get endpoints of shortest lines between points and river centerline
+        query = f"""SELECT st_endpoint(ST_ShortestLine(p.geometry, l.geometry)) as geometry,
+                    p.{field_list[0]},
+                    ROUND(ST_Length(ST_ShortestLine(p.geometry, l.geometry)), 6) AS distance
+                    FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
+        # run this query to create 2nd projected point layer
+        res_projected2, projected2 = self.runSqlQuery(layer_list, field_list, query, 0, parameters[self.PROJECTED2], context, feedback)
+        #res_projected2, projected2 = self.runSqlQuery(layer_list, field_list, query, 0, 'memory:', context, feedback)
+        
+        
+        # load layers
+        message = 'projected1 : ' + str(type(projected1))
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        projected1 = context.takeResultLayer(projected1)
+        projected2 = context.takeResultLayer(projected2)
+        #QgsProject.instance().addMapLayer(projected1)
+        #QgsProject.instance().addMapLayer(projected2)
+        message = 'projected1 : ' + str(type(projected1))
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        
+        
+        # 3/ CALCULATE DISTANCES BETWEEN INPUT POINTS, AND BETWEEN PROJECTED POINTS
+        ####################################################################################
+        
+        # DISTANCES BETWEEN INPUT POINTS
+        message = 'Preparing SQL query to calculate distances between input layers...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        # get names or full path for input point layers
+        layer_list = [input1, input2]
+        call_layer_list = self.callableLayers(layer_list, feedback)
+        # id fields are needed for both input layers
+        field_list = [idfield1, idfield2]
+        # query to calculate distances between pair of original points with same id
+        # this is a full join : all points will be kept whereas present in either layer or in both
+        query = f"""SELECT p1.{idfield1} as {id1_colname}, p2.{idfield2} as {id2_colname}, 
+                        ST_Distance(p1.geometry, p2.geometry) as {dist_colname} 
+                        FROM "{call_layer_list[0]}" as p1 LEFT JOIN "{call_layer_list[1]}" as p2 
+                        ON p1.{idfield1} = p2.{idfield2}
+                    UNION
+                    SELECT p1.{idfield1} as {idfield1}, p2.{idfield2} as {idfield2}, 
+                        ST_Distance(p1.geometry, p2.geometry) as {dist_colname} 
+                        FROM "{call_layer_list[1]}" as p2 LEFT JOIN "{call_layer_list[0]}" as p1 
+                        ON p1.{idfield1} = p2.{idfield2};"""
+        # run this query to create table with distances
+        table_distances = self.runSqlQuery(layer_list, field_list, query, 1, 'memory:', context, feedback)[1]
+        
+        # DISTANCES BETWEEN PROJECTED POINTS
+        message = 'Preparing SQL query to calculate distances between projected layers...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        # input layers for the SQL query
+        layer_list = [projected1, projected2]
+        # id fields are needed for both input layers
+        field_list = [idfield1, idfield2]
+        # query to calculate distances between pair of projected points with same id
+        # this is a full join : all points will be kept whereas present in either layer or in both
+        query = f"""SELECT p1.{idfield1} as {id1_colname}, p2.{idfield2} as {id2_colname}, 
+                        ST_Distance(p1.geometry, p2.geometry) as {riverdist_colname} 
+                        FROM "{call_layer_list[0]}" as p1 LEFT JOIN "{call_layer_list[1]}" as p2 
+                        ON p1.{idfield1} = p2.{idfield2}
+                    UNION
+                    SELECT p1.{idfield1} as {id1_colname}, p2.{idfield2} as {id2_colname}, 
+                        ST_Distance(p1.geometry, p2.geometry) as {riverdist_colname}  
+                        FROM "{call_layer_list[1]}" as p2 LEFT JOIN "{call_layer_list[0]}" as p1 
+                        ON p1.{idfield1} = p2.{idfield2};"""
+        # run this query to create table with projected distances
+        table_projected_distances = self.runSqlQuery(call_layer_list, field_list, query, 1, 'memory:', context, feedback)[1]
+        
+        
+        # 4/ SAVE RESULTS TO OUTPUT TABLE
+        ####################################################################################
+        
+        # Get the 2 distance tables from context
+        # https://gis.stackexchange.com/a/362146/175131
+        table_distances = context.getMapLayer(table_distances)
+        table_projected_distances = context.getMapLayer(table_projected_distances)
+            
+        # create one python dataframe from the 2 distance tables
+        distance_df = self.createDataframe(table_distances, table_projected_distances, id1_colname, id2_colname, feedback)
+        
+        # do some treatments on dataframe
+        distance_df = self.dfCalculations(distance_df, context, feedback)
+        
+        # Then write CSV out of this dataframe
+        #self.createCsv(output_folder, distance_df, csv_name, context, feedback)
+        
+        # Then add dataframe to sink
+        self.addFeaturestoSink(distance_df, sink)
+        
+        
+        # 5/ RETURN THE RESULTING TABLE AND LAYERS
+        ####################################################################################
+        # if centerline layer is wanted :
         try:
-            return {self.PROJECTED1:projected1, self.PROJECTED2:projected2, self.CENTERLINE_OUTPUT:centerline_output['output']}
+            # return distance table, projected points layers and centerline layer
+            return {self.OUTPUT_TABLE: dest_id, self.PROJECTED1:res_projected1['OUTPUT'], self.PROJECTED2:res_projected2['OUTPUT'], self.CENTERLINE_OUTPUT:centerline_output['output']}
+        # if no centerline generated :
         except NameError:
-            return {self.PROJECTED1:projected1, self.PROJECTED2:projected2}
+            # return distance table and projected points layers
+            return {self.OUTPUT_TABLE: dest_id, self.PROJECTED1:res_projected1['OUTPUT'], self.PROJECTED2:res_projected2['OUTPUT']}
     
+    
+    # FUNCTIONS
+    ####################################################################################
+    
+    # create centerline of a polygon with grass voronoi.skeleton algorithm
     def createCenterline(self, polygon, parameters, context, feedback):
         message = 'Creating  centerline with grass voronoi.skeleton algorithm...'
-        feedback.pushInfo(QCoreApplication.translate('Segmentation Boxes', message))
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # voronoi.skeleton parameters
         skeleton_param = {'input' : polygon,
                   'smoothness' : 0.1,
@@ -228,9 +372,10 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # return centerline
         return skeleton_result
     
+    # given a line layer, merge all lines into one with dissolve algorithm
     def mergeLines(self, line, context, feedback):
         message = 'Grouping lines with dissolve algorithm...'
-        feedback.pushInfo(QCoreApplication.translate('Segmentation Boxes', message))
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # dissolve parameters
         dissolve_param = {'INPUT' : line,
                   'FIELD' : None,
@@ -245,83 +390,92 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # return dissolved layer
         return dissolve_layer
     
-    def runSqlQuery(self, layer_list, field_list, query, context, feedback):
-        pass
-    
-    def projectPoints(self, point_layer, point_id_field, line_layer, projected, parameters, context, feedback):
-        message = 'Executing SQL query to project points on river centerline...'
+    # if a layer is loaded, get its name, else gets it source = full path
+    def callableLayers(self, layer_list, feedback):
+        message = 'retrieving layer names or sources...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        # if layer is loaded, get its name, else gets it source = full path
-        if len(QgsProject.instance().mapLayersByName(point_layer.name())) != 0:
-            call_point_layer = point_layer.name()
-        else:
-            call_point_layer = point_layer.source()
-        if len(QgsProject.instance().mapLayersByName(line_layer.name())) != 0:
-            call_line_layer = line_layer.name()
-        else:
-            call_line_layer = line_layer.source()
-        # SQL query to get intersection between 1/ shortest lines between points and river centerline and 2/ river centerline
-        query = f"""SELECT st_endpoint(ST_ShortestLine(p.geometry, l.geometry)) as geometry,
-                    p.{point_id_field},
-                    ROUND(ST_Length(ST_ShortestLine(p.geometry, l.geometry)), 6) AS distance
-                FROM "{call_point_layer}" AS p, "{call_line_layer}" AS l"""
+        call_layer_list = []
+        for layer in layer_list:
+            # if layer is loaded in QGIS, get its name
+            if len(QgsProject.instance().mapLayersByName(layer.name())) != 0:
+                call_layer_list.append(layer.name())
+            # else, get its full path
+            else:
+                call_layer_list.append(layer.source())
+        return call_layer_list
+    
+    # run an sql query given a query, list of layers and list of field, layers must be names or sources (full paths)
+    # geom_type : geometry type for resulting layer, 0 for autodetect, 1 for no geometry (cf. alghelp for more)
+    def runSqlQuery(self, layer_list, field_list, query, geom_type, output, context, feedback):
+        message = 'Executing SQL query...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # executesql parameters
-        executesql_param = {'INPUT_DATASOURCES' : [call_point_layer, call_line_layer],
+        executesql_param = {'INPUT_DATASOURCES' : layer_list,
                             'INPUT_QUERY' : query,
-                            'OUTPUT' : parameters[projected]} # to output this layer in QGIS as well
+                            'INPUT_GEOMETRY_TYPE' : geom_type,
+                            'OUTPUT' : output} # i.e. parameters[self.PROJECTED1] to output this layer in QGIS, else just a string
         # run executesql algorithm
-        executesql_result = processing.run("qgis:executesql", executesql_param, is_child_algorithm=True, context=context, feedback=feedback)
-        executesql_layer = executesql_result['OUTPUT']
+        result = processing.run("qgis:executesql", executesql_param, is_child_algorithm=True, context=context, feedback=feedback)
+        #result = processing.runAndLoadResults("qgis:executesql", executesql_param, context=context, feedback=feedback)
+        layer = result['OUTPUT']
         # Check for cancelation
         if feedback.isCanceled():
             return {}
         # return projected points layer
-        return executesql_layer
+        return result, layer
     
-    def createDistanceDataframe(self, input1, input2, projected1, projected2, idfield1, idfield2, context, feedback):
-        message = 'Calculating distances between orginal points...'
+    # create dataframe from multiple tables
+    # tables must have following fields in this order : 1st point id, 2nd point id, distance between the 2 points
+    # dataframe will have following columns : 1st point id, 2nd point id, and as many distance columns as input tables, named according to fieldname_list
+    def createDataframe(self, table1, table2, id1_colname, id2_colname, feedback):
+        message = 'Creating dataframe from distance tables...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        # if layer is loaded, get its name, else gets it source = full path
-        if len(QgsProject.instance().mapLayersByName(input1.name())) != 0:
-            call_input1 = input1.name()
-        else:
-            call_input1 = input1.source()
-        if len(QgsProject.instance().mapLayersByName(input2.name())) != 0:
-            call_input2 = input2.name()
-        else:
-            call_input2 = input2.source()
-        # create table with distances between original points
-        query = f"""SELECT p1.{idfield1} as ID1, p2.{idfield2} as ID2, ST_Distance(p1.geometry, p2.geometry) as distance 
-                        FROM "{call_input1}" as p1 LEFT JOIN "{call_input2}" as p2 
-                        ON p1.{idfield1} = p2.{idfield2}
-                    UNION
-                    SELECT p1.{idfield1} as ID1, p2.{idfield2} as ID2, ST_Distance(p1.geometry, p2.geometry) as distance 
-                        FROM "{call_input2}" as p2 LEFT JOIN "{call_input1}" as p1 
-                        ON p1.{idfield1} = p2.{idfield2};"""
-        executesql_param = {'INPUT_DATASOURCES' : [input1, input2],
-                            'INPUT_QUERY' : query,
-                            'OUTPUT' : "distances1"}
-        executesql_result = processing.run("qgis:executesql", executesql_param, is_child_algorithm=True, context=context, feedback=feedback)
-        distances1 = executesql_result['OUTPUT']
-        # convert table to python dictionary
-        fields = distances1.fields()
-        dic = dict((field.name(), []) for field in fields)
-        features = distances1.getfeatures()
-        for feature in features:
-            for field in fields:
-                dic[field.name()].append(feature[field.name()])
-        # convert dictionary to pandas dataframe
-        df = pd.DataFrame(data=dic)
-        # create table with distances between projected points
+        # will contain one dataframe for each table
+        df_list = []
+        # for each table
+        for table in [table1, table2]:
+            # create dictionary where keys = table column names
+            fieldnames = [field.name() for field in table.fields() if field.name() != 'fid']
+            table_dic = dict((fieldname, []) for fieldname in fieldnames)
+            # and fill the dictionary with the values for each column
+            features = table.getFeatures()
+            for feature in features:
+                for fieldname in fieldnames:
+                    table_dic[fieldname].append(feature[fieldname])
+            # convert dictionary to pandas dataframe
+            df = pd.DataFrame(data=table_dic)
+            # and save it in df_list
+            df_list.append(df)
+            
+        # merge the 2 dataframes
+        result_df = pd.merge(df_list[0], df_list[1], on=[id1_colname, id2_colname])
         
-        # join the 2 tables into one table
-        
-        # convert table to dataframe
-        
-        # round distances
+        return result_df
     
-    def createCsv(self, output_folder, dataframe, context, feedback):
-        pass
+    # do some calculations on distances dataframe (round distances...)
+    def dfCalculations(self, df, context, feedback):
+        return df
+    
+#    def createCsv(self, output_folder, dataframe, csv_name, context, feedback):
+#        # if output folder do not exist, create it (save to temporary folder)
+#        if not path.exists(output_folder):
+#            mkdir(output_folder)
+#        csv_file = output_folder + '/' + csv_name + ".csv"
+#        pd.DataFrame(dataframe).to_csv(csv_file, index=False)
+    
+    # given a dataframe and the output table as a sink, add each line of df to table
+    def addFeaturestoSink(self, df, table):
+        # for each row in dataframe
+        for i in range(len(df.index)):
+            row = df.iloc[i]
+            # create list from line
+            l = row.tolist()
+            # add it to feature
+            f = QgsFeature()
+            f.setAttributes(l)
+            # and add feature to table
+            table.addFeature(f)
+        
     
 
     def name(self):
