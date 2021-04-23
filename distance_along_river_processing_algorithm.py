@@ -44,7 +44,8 @@ from qgis.core import (QgsProcessing,
                        QgsCoordinateReferenceSystem,
                        QgsFields,
                        QgsField,
-                       QgsFeature)
+                       QgsFeature,
+                       NULL)
 import processing
 import pandas as pd
 
@@ -146,7 +147,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                 self.tr('Output centerline layer, can be created if input layer is polygon'),
                 defaultValue='', # ignore output by default
                 optional=True
-                #QgsProcessing.TypeVectorPolygon
             )
         )
             
@@ -156,7 +156,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                 self.PROJECTED1,
                 self.tr('Output projected point layer 1'),
                 optional=True
-                #QgsProcessing.TypeVectorPolygon
             )
         )
             
@@ -166,7 +165,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                 self.PROJECTED2,
                 self.tr('Output projected point layer 2'),
                 optional=True
-                #QgsProcessing.TypeVectorPolygon
             )
         )
 
@@ -201,13 +199,13 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # 1/ PREPARATION : CREATE CENTERLINE IF NEEDED, MERGE LINES IN CENTERLINE IF NEEDED
         ####################################################################################
         
-        # if river layer is polygon, calculate the centerline for the input layer        
+        # if river layer is polygon, calculate the centerline for the input layer
         if river.geometryType() == QgsWkbTypes.PolygonGeometry :
+            message = 'river is polygon, calculating centerline...'
+            feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
             centerline = self.createCenterline(river, parameters, context, feedback)
             centerline_layer = QgsVectorLayer(centerline, "centerline", "ogr")
             QgsProject.instance().addMapLayer(centerline_layer)
-            message = 'centerline layer : ' + str(centerline_layer)
-            feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # if input layer is line, it is considered as centerline
         if river.geometryType() == QgsWkbTypes.LineGeometry:
             centerline_layer = river
@@ -215,6 +213,8 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             features = centerline_layer.getFeatures()
             nb_features = sum(1 for _ in features)
             if nb_features > 1:
+                message = 'merging lines in river layer...'
+                feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
                 centerline = self.mergeLines(centerline_layer, context, feedback)
                 centerline_layer = QgsVectorLayer(centerline, "centerline", "ogr")
                 QgsProject.instance().addMapLayer(centerline_layer)
@@ -228,7 +228,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # 2/ PROJECT POINTS FROM INPUT LAYERS ON RIVER CENTERLINE
         ####################################################################################
         
-        message = 'Preparing SQL query to project 1st input layer on river...'
+        message = 'Projecting 1st input layer on river...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # get names or full path for 1st point layer and centerline
         layer_list = [input1, centerline_layer]
@@ -243,7 +243,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # run this query to create 1st projected point layer
         layer_projected1 = self.runSqlQuery(layer_list, field_list, query, 0, projected1, context, feedback)
         
-        message = 'Preparing SQL query to project 2nd input layer on river...'
+        message = 'Projecting 2nd input layer on river...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # get names or full path for 2nd point layer and centerline
         layer_list = [input2, centerline_layer]
@@ -273,7 +273,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         ####################################################################################
         
         # DISTANCES BETWEEN INPUT POINTS
-        message = 'Preparing SQL query to calculate distances between input layers...'
+        message = 'Calculating distances between input layers...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # get names or full path for input point layers
         layer_list = [input1, input2]
@@ -295,7 +295,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         table_distances = self.runSqlQuery(layer_list, field_list, query, 1, 'memory:', context, feedback)
         
         # DISTANCES BETWEEN PROJECTED POINTS
-        message = 'Preparing SQL query to calculate distances between projected layers...'
+        message = 'Calculating distances between projected layers...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # input layers for the SQL query
         layer_list = [projected1, projected2]
@@ -319,6 +319,8 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # 4/ SAVE RESULTS TO OUTPUT TABLE
         ####################################################################################
         
+        message = 'Saving distances to table...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # Get the 2 distance tables from context
         # https://gis.stackexchange.com/a/362146/175131
         table_distances = context.getMapLayer(table_distances)
@@ -328,7 +330,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         distance_df = self.createDataframe(table_distances, table_projected_distances, id1_colname, id2_colname, feedback)
         
         # do some treatments on dataframe
-        distance_df = self.dfCalculations(distance_df, context, feedback)
+        distance_df = self.dfCalculations(distance_df, 2, dist_colname, riverdist_colname, feedback)
         
         # Then add dataframe to sink
         self.addFeaturestoSink(distance_df, sink)
@@ -345,7 +347,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # if no centerline generated :
         else:
             # return distance table and projected points layers
-            return {self.OUTPUT_TABLE: dest_id, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2}
+            return {'df' : distance_df, self.OUTPUT_TABLE: dest_id, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2}
  
     
     # FUNCTIONS
@@ -353,8 +355,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
     
     # create centerline of a polygon with grass voronoi.skeleton algorithm
     def createCenterline(self, polygon, parameters, context, feedback):
-        message = 'Creating  centerline with grass voronoi.skeleton algorithm...'
-        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # voronoi.skeleton parameters
         skeleton_param = {'input' : polygon,
                   'smoothness' : 0.1,
@@ -372,8 +372,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
     
     # given a line layer, merge all lines into one with dissolve algorithm
     def mergeLines(self, line, context, feedback):
-        message = 'Grouping lines with dissolve algorithm...'
-        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # dissolve parameters
         dissolve_param = {'INPUT' : line,
                   'FIELD' : None,
@@ -390,8 +388,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
     
     # if a layer is loaded, get its name, else gets it source = full path
     def callableLayers(self, layer_list, feedback):
-        message = 'retrieving layer names or sources...'
-        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         call_layer_list = []
         for layer in layer_list:
             # if layer is loaded in QGIS, get its name
@@ -405,8 +401,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
     # run a sql query given a query, list of layers and list of field, layers must be names or sources (full paths)
     # geom_type : geometry type for resulting layer, 0 for autodetect, 1 for no geometry (cf. alghelp for more)
     def runSqlQuery(self, layer_list, field_list, query, geom_type, output, context, feedback):
-        message = 'Executing SQL query...'
-        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         # executesql parameters
         executesql_param = {'INPUT_DATASOURCES' : layer_list,
                             'INPUT_QUERY' : query,
@@ -451,10 +445,17 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         return result_df
     
     # do some calculations on distances dataframe (round distances...)
-    def dfCalculations(self, df, context, feedback):
+    def dfCalculations(self, df, decimal_count, dist_colname, riverdist_colname, feedback):
+        # 1/ round distances
+        ###########################################
+        # round column with straight line distances
+        df[dist_colname] = df[dist_colname].apply(lambda x:round(float(x), decimal_count) if x != NULL else NULL)
+        # round column with distances along river axis
+        df[riverdist_colname] = df[riverdist_colname].apply(lambda x:round(float(x), decimal_count) if x != NULL else NULL)
+                
         return df
     
-    # given a dataframe and the output table as a sink, add each line of df to table
+    # given a dataframe and the output table, add each line of dataframe to table
     def addFeaturestoSink(self, df, table):
         # for each row in dataframe
         for i in range(len(df.index)):
