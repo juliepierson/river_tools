@@ -37,7 +37,8 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterDistance,
                        QgsProcessingParameterVectorDestination,
                        QgsWkbTypes,
-                       QgsProcessingParameterVectorLayer)
+                       QgsProcessingParameterVectorLayer,
+                       QgsVectorLayer)
 import processing
 
 
@@ -142,8 +143,11 @@ class SegmentationBoxesAlgorithm(QgsProcessingAlgorithm):
         length = self.parameterAsInt(parameters, self.LENGTH, context)
         width = self.parameterAsInt(parameters, self.WIDTH, context)
        
-        # if input layer is polygon and no centerline provided, calculate the centerline for the input layer        
+        # if input layer is polygon and no centerline provided
         if river.geometryType() == QgsWkbTypes.PolygonGeometry and not centerline:
+            # check topology
+            river = self.checkTopology(river, context, feedback)
+            # calculate the centerline for the input layer       
             centerline_output = self.createCenterline(river, parameters, context, feedback)
             centerline = centerline_output['output']
         # if input layer is line, it is considered as centerline
@@ -179,6 +183,51 @@ class SegmentationBoxesAlgorithm(QgsProcessingAlgorithm):
             return {self.OUTPUT:boxes['OUTPUT'], self.CENTERLINE_OUTPUT:centerline_output['output']}
         except NameError:
             return {self.OUTPUT:boxes['OUTPUT']}
+        
+    def checkTopology(self, river, context, feedback):
+        message = 'Checking topology for river layer...'
+        feedback.pushInfo(QCoreApplication.translate('Segmentation Boxes', message))
+        invalid = False
+        # check validity for each feature in layer
+        for feature in river.getFeatures():
+            geom = feature.geometry()
+            # if an invalid geometry is encountered
+            if not geom.isGeosValid():
+                invalid = True
+                break
+            
+        # if layer has invalid geometries
+        if invalid == True:
+            message = 'Invalid geometry found, trying buffering by zero...'
+            feedback.pushInfo(QCoreApplication.translate('Segmentation Boxes', message))
+            # try buffering layer by 0
+            buffer_param = {'INPUT' : river,
+                      'DISTANCE' : 0,
+                      'SEGMENTS' : 5,
+                      'END_CAP_STYLE' : 0, # 0 : round, 1 : flat, 2 : square
+                      'JOIN_STYLE' : 0, #  0 : round, 1 : square angle, 2 : oblique
+                      'MITER_LIMIT' : 2,
+                      'DISSOLVE' : False,
+                      'OUTPUT' : 'buffer'}
+            buffer_result = processing.run("native:buffer", buffer_param, is_child_algorithm=True, context=context, feedback=feedback)
+            river = buffer_result['OUTPUT']
+            if feedback.isCanceled():
+                return {}
+            
+            # check validity again
+            river = QgsVectorLayer(river, "river", "ogr")
+            for feature in river.getFeatures():
+                geom = feature.geometry()
+                # if an invalid geometry is encountered again, exit with error message
+                if not geom.isGeosValid():
+                    message = 'Didn''t work ! Invalid geometry in river layer, please check topology'
+                    feedback.reportError(QCoreApplication.translate('Distance along river', message))
+                    return {}
+                
+        # if script wasn't exited :
+        message = 'geometry is valid !'
+        feedback.pushInfo(QCoreApplication.translate('Segmentation Boxes', message))
+        return river
     
     def createCenterline(self, polygon, parameters, context, feedback):
         message = 'Creating  centerline with grass voronoi.skeleton algorithm...'
