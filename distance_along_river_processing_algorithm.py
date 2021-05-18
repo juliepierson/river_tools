@@ -45,6 +45,10 @@ from qgis.core import (QgsProcessing,
                        QgsFields,
                        QgsField,
                        QgsFeature,
+                       QgsProcessingUtils,
+                       QgsCoordinateTransform,
+                       QgsDistanceArea,
+                       QgsPointXY,
                        NULL)
 import processing
 import pandas as pd
@@ -182,7 +186,8 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         projected1 = self.parameterAsOutputLayer(parameters, self.PROJECTED1, context)
         projected2 = self.parameterAsOutputLayer(parameters, self.PROJECTED2, context)
         # before creating output distance table, its fields must be defined
-        field_list = [['ID1', QVariant.Int], ['ID2', QVariant.Int], ['straight_dist', QVariant.Double], ['river_dist', QVariant.Double]]
+        #field_list = [['ID1', QVariant.Int], ['ID2', QVariant.Int], ['straight_dist', QVariant.Double], ['river_dist', QVariant.Double]]
+        field_list = [['ID1', QVariant.String], ['ID2', QVariant.String], ['straight_dist', QVariant.Double], ['river_dist', QVariant.Double]]
         fields = QgsFields()
         for fieldname, fieldtype in field_list:
             fields.append(QgsField(fieldname, fieldtype))
@@ -194,6 +199,9 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         id2_colname = field_list[1][0] # ID of 2nd point
         dist_colname = field_list[2][0] # straight line distance between pair of points
         riverdist_colname = field_list[3][0] # along-river distance between pair of projected points
+        
+        # check input parameters
+        self.checkParameters(context, feedback)
        
         
         # 1/ PREPARATION : CREATE CENTERLINE IF NEEDED, MERGE LINES IN CENTERLINE IF NEEDED
@@ -242,6 +250,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                     FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
         # run this query to create 1st projected point layer
         layer_projected1 = self.runSqlQuery(layer_list, field_list, query, 0, projected1, context, feedback)
+        layer_projected1 = QgsProcessingUtils.mapLayerFromString(layer_projected1, context)
         
         message = 'Projecting 2nd input layer on river...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
@@ -257,63 +266,34 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                     FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
         # run this query to create 2nd projected point layer
         layer_projected2 = self.runSqlQuery(layer_list, field_list, query, 0, projected2, context, feedback)
-        
-#        # load layers
-#        message = 'projected1 : ' + str(type(projected1))
-#        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-#        projected1 = context.takeResultLayer(projected1)
-#        projected2 = context.takeResultLayer(projected2)
-#        #QgsProject.instance().addMapLayer(projected1)
-#        #QgsProject.instance().addMapLayer(projected2)
-#        message = 'projected1 : ' + str(type(projected1))
-#        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', layer_projected2))
+        layer_projected2 = QgsProcessingUtils.mapLayerFromString(layer_projected2, context)
         
         
         # 3/ CALCULATE DISTANCES BETWEEN INPUT POINTS, AND BETWEEN PROJECTED POINTS
         ####################################################################################
         
         # DISTANCES BETWEEN INPUT POINTS
+        message = 'Getting input layer coordinates...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        dic_layer1 = self.getCoordinates(input1, idfield1, context)
+        dic_layer2 = self.getCoordinates(input2, idfield2, context)
+        
         message = 'Calculating distances between input layers...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        # get names or full path for input point layers
-        layer_list = [input1, input2]
-        call_layer_list = self.callableLayers(layer_list, feedback)
-        # id fields are needed for both input layers
-        field_list = [idfield1, idfield2]
-        # query to calculate distances between pair of original points with same id
-        # this is a full join : all points will be kept whereas present in either layer or in both
-        query = f"""SELECT p1.{idfield1} as {id1_colname}, p2.{idfield2} as {id2_colname}, 
-                        ST_Distance(p1.geometry, p2.geometry) as {dist_colname} 
-                        FROM "{call_layer_list[0]}" as p1 LEFT JOIN "{call_layer_list[1]}" as p2 
-                        ON p1.{idfield1} = p2.{idfield2}
-                    UNION
-                    SELECT p1.{idfield1} as {idfield1}, p2.{idfield2} as {idfield2}, 
-                        ST_Distance(p1.geometry, p2.geometry) as {dist_colname} 
-                        FROM "{call_layer_list[1]}" as p2 LEFT JOIN "{call_layer_list[0]}" as p1 
-                        ON p1.{idfield1} = p2.{idfield2};"""
-        # run this query to create table with distances
-        table_distances = self.runSqlQuery(layer_list, field_list, query, 1, 'memory:', context, feedback)
+        crs = input1.crs()
+        table_distances = self.calculateDistances(crs, dic_layer1, dic_layer2, id1_colname, id2_colname, dist_colname, context, feedback)
         
         # DISTANCES BETWEEN PROJECTED POINTS
+        message = 'Getting projected layers coordinates...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        dic_layer1proj = self.getCoordinates(layer_projected1, idfield1, context)
+        dic_layer2proj = self.getCoordinates(layer_projected2, idfield2, context)
+        
         message = 'Calculating distances between projected layers...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        # input layers for the SQL query
-        layer_list = [projected1, projected2]
-        # id fields are needed for both input layers
-        field_list = [idfield1, idfield2]
-        # query to calculate distances between pair of projected points with same id
-        # this is a full join : all points will be kept whereas present in either layer or in both
-        query = f"""SELECT p1.{idfield1} as {id1_colname}, p2.{idfield2} as {id2_colname}, 
-                        ST_Distance(p1.geometry, p2.geometry) as {riverdist_colname} 
-                        FROM "{call_layer_list[0]}" as p1 LEFT JOIN "{call_layer_list[1]}" as p2 
-                        ON p1.{idfield1} = p2.{idfield2}
-                    UNION
-                    SELECT p1.{idfield1} as {id1_colname}, p2.{idfield2} as {id2_colname}, 
-                        ST_Distance(p1.geometry, p2.geometry) as {riverdist_colname}  
-                        FROM "{call_layer_list[1]}" as p2 LEFT JOIN "{call_layer_list[0]}" as p1 
-                        ON p1.{idfield1} = p2.{idfield2};"""
-        # run this query to create table with projected distances
-        table_projected_distances = self.runSqlQuery(call_layer_list, field_list, query, 1, 'memory:', context, feedback)
+        crs = layer_projected1.crs()
+        table_projected_distances = self.calculateDistances(crs, dic_layer1proj, dic_layer2proj, id1_colname, id2_colname, riverdist_colname, context, feedback)
         
         
         # 4/ SAVE RESULTS TO OUTPUT TABLE
@@ -321,19 +301,25 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         
         message = 'Saving distances to table...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        # Get the 2 distance tables from context
-        # https://gis.stackexchange.com/a/362146/175131
-        table_distances = context.getMapLayer(table_distances)
-        table_projected_distances = context.getMapLayer(table_projected_distances)
-            
-        # create one python dataframe from the 2 distance tables
-        distance_df = self.createDataframe(table_distances, table_projected_distances, id1_colname, id2_colname, feedback)
+       
+        # create one dataframe from the 2 dataframes
+        if table_distances[id1_colname].equals(table_projected_distances[id1_colname]) and table_distances[id2_colname].equals(table_projected_distances[id2_colname]):
+            df_result = table_distances
+            df_result[riverdist_colname] = table_projected_distances[riverdist_colname]
+        else:
+            message = 'Sorry, there was an error while creating result dataframe'
+            feedback.reportError(QCoreApplication.translate('Distance along river', message))
+            return {}
         
         # do some treatments on dataframe
-        distance_df = self.dfCalculations(distance_df, 2, dist_colname, riverdist_colname, feedback)
+        message = 'Some cosmetic on result dataframe...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        df_result = self.dfCalculations(df_result, 2, dist_colname, riverdist_colname, feedback)
         
         # Then add dataframe to sink
-        self.addFeaturestoSink(distance_df, sink)
+        message = 'Saving dataframe to table...'
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
+        self.addFeaturestoSink(df_result, sink)
         
         
         # 5/ RETURN THE RESULTING TABLE AND LAYERS
@@ -347,11 +333,19 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # if no centerline generated :
         else:
             # return distance table and projected points layers
-            return {'df' : distance_df, self.OUTPUT_TABLE: dest_id, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2}
+            return {self.OUTPUT_TABLE: dest_id, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2}
+            #return {'df': df_result}
  
     
     # FUNCTIONS
     ####################################################################################
+    
+    def checkParameters(self, context, feedback):
+        # check geometry types
+        # TODO
+        # check if both input point layers have same crs
+        # TODO
+        pass
     
     # create centerline of a polygon with grass voronoi.skeleton algorithm
     def createCenterline(self, polygon, parameters, context, feedback):
@@ -407,8 +401,10 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                             'INPUT_GEOMETRY_TYPE' : geom_type,
                             'OUTPUT' : output} # i.e. parameters[self.PROJECTED1] to output this layer in QGIS, else just a string
         # run executesql algorithm
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', 'pip'))
         result = processing.run("qgis:executesql", executesql_param, is_child_algorithm=True, context=context, feedback=feedback)
         #result = processing.runAndLoadResults("qgis:executesql", executesql_param, context=context, feedback=feedback)
+        feedback.pushInfo(QCoreApplication.translate('Distance along river', 'pap'))
         layer = result['OUTPUT']
         # Check for cancelation
         if feedback.isCanceled():
@@ -416,33 +412,62 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # return projected points layer
         return layer
     
-    # create dataframe from multiple tables
-    # tables must have following fields in this order : 1st point id, 2nd point id, distance between the 2 points
-    # dataframe will have following columns : 1st point id, 2nd point id, and as many distance columns as input tables, named according to fieldname_list
-    def createDataframe(self, table1, table2, id1_colname, id2_colname, feedback):
-        message = 'Creating dataframe from distance tables...'
-        feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        # will contain one dataframe for each table
-        df_list = []
-        # for each table
-        for table in [table1, table2]:
-            # create dictionary where keys = table column names
-            fieldnames = [field.name() for field in table.fields() if field.name() != 'fid']
-            table_dic = dict((fieldname, []) for fieldname in fieldnames)
-            # and fill the dictionary with the values for each column
-            features = table.getFeatures()
-            for feature in features:
-                for fieldname in fieldnames:
-                    table_dic[fieldname].append(feature[fieldname])
-            # convert dictionary to pandas dataframe
-            df = pd.DataFrame(data=table_dic)
-            # and save it in df_list
-            df_list.append(df)
+    # from one layer, create a dictionary with id values as keys and qgspoints as values
+    # if layer crs is projected, convert coordinates to geographic ones
+    def getCoordinates(self, layer, idfield, context):
+        # initiates result dictionary
+        dic_layer = {}
+        # iterates over features
+        for f in layer.getFeatures():
+            dic_layer[f[idfield]] = QgsPointXY(f.geometry().asPoint()[0], f.geometry().asPoint()[1])
+        # get layer crs
+        crs = layer.crs()
+        # if crs is projected
+        if layer.crs().isGeographic() == False:
+            # transform projected coordinates in geographic coordinates
+            transformContext = QgsProject.instance().transformContext()
+            geog_crs = QgsCoordinateReferenceSystem(crs.geographicCrsAuthId())
+            xform = QgsCoordinateTransform(crs, geog_crs, transformContext)
+            for key, value in dic_layer.items():
+                dic_layer[key] = xform.transform(dic_layer[key])
+        return dic_layer
+    
+    # calculate distances between pair of points in 2 layers with same id using pyproj
+    def calculateDistances(self, crs, dic_layer1, dic_layer2, id1_colname, id2_colname, dist_colname, context, feedback):
+        # uses QgsDistanceArea to calculate ellipsoid based distances
+        d = QgsDistanceArea()
+        d.setEllipsoid(crs.ellipsoidAcronym())
+        # get all keys from both dictionaries, no duplicates
+        id_set = set(list(dic_layer1.keys()) + list(dic_layer2.keys()))
+        # create empty result dictionary
+        dic_result = {id1_colname : [], id2_colname : [], dist_colname : []}
+        # for each key
+        for pnt_id in id_set:
+            # if point is present in both layers
+            if pnt_id in dic_layer1.keys() and pnt_id in dic_layer2.keys():
+                # calculate distance between points with same id
+                #pt1 = QgsPointXY(dic_layer1[pnt_id][0], dic_layer1[pnt_id][1])
+                #pt2 = QgsPointXY(dic_layer2[pnt_id][0], dic_layer1[pnt_id][1])
+                distance = d.measureLine(dic_layer1[pnt_id], dic_layer2[pnt_id])
+                # fills result dictionary
+                dic_result[id1_colname].append(pnt_id)
+                dic_result[id2_colname].append(pnt_id)
+                dic_result[dist_colname].append(distance)
+            # if point is present only in one layer
+            else:
+                # fills result dictionary
+                dic_result[dist_colname].append(NULL)
+                if pnt_id in dic_layer1.keys():
+                    dic_result[id1_colname].append(pnt_id)
+                    dic_result[id2_colname].append(NULL)
+                else:
+                    dic_result[id1_colname].append(NULL)
+                    dic_result[id2_colname].append(pnt_id)
+        # convert dictionary to pandas dataframe
+        df_result = pd.DataFrame.from_dict(dic_result)
+        # finished
+        return df_result
             
-        # merge the 2 dataframes
-        result_df = pd.merge(df_list[0], df_list[1], on=[id1_colname, id2_colname])
-        
-        return result_df
     
     # do some calculations on distances dataframe (round distances...)
     def dfCalculations(self, df, decimal_count, dist_colname, riverdist_colname, feedback):
