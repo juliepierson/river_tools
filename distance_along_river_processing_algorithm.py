@@ -204,7 +204,10 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         riverdist_colname = field_list[3][0] # along-river distance between pair of projected points
         
         # check input parameters
-        self.checkParameters(context, feedback)
+        check = self.checkParameters(input1, input2, river, context, feedback)
+        # exit plugin if input parameters are not valid
+        if check == "problem":
+            return{}
         
         
         # 1/ PREPARATION : CREATE CENTERLINE IF NEEDED, MERGE LINES IN CENTERLINE IF NEEDED
@@ -338,12 +341,17 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
     # FUNCTIONS
     ####################################################################################
     
-    def checkParameters(self, context, feedback):
-        # check geometry types
-        # TODO
-        # check if both input point layers have same crs
-        # TODO
-        pass
+    def checkParameters(self, input1, input2, river, context, feedback):
+        # checking geometry types is not necessary since both input point layers are TypeVectorPoint
+        # checking if 3 input layers have same crs
+        if input1.crs() != input2.crs():
+            message = 'Input point layers have different coordinate systems'
+            feedback.reportError(QCoreApplication.translate('Distance along river', message))
+            return "problem"
+        if input1.crs() != river.crs():
+            message = 'Input point layers and river layer have different coordinate systems'
+            feedback.reportError(QCoreApplication.translate('Distance along river', message))
+            return "problem"
     
     # create centerline of a polygon with grass voronoi.skeleton algorithm
     def createCenterline(self, polygon, parameters, context, feedback):
