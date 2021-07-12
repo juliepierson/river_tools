@@ -36,7 +36,6 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingContext,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterVectorDestination,
-                       QgsProcessingParameterFeatureSink,
                        QgsProcessingParameterFileDestination,
                        QgsWkbTypes,
                        QgsProcessingParameterVectorLayer,
@@ -46,7 +45,6 @@ from qgis.core import (QgsProcessing,
                        QgsCoordinateReferenceSystem,
                        QgsFields,
                        QgsField,
-                       QgsFeature,
                        QgsProcessingUtils,
                        QgsCoordinateTransform,
                        QgsDistanceArea,
@@ -54,7 +52,6 @@ from qgis.core import (QgsProcessing,
                        NULL)
 import processing
 import pandas as pd
-import csv
 
 
 class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
