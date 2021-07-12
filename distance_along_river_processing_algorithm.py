@@ -33,9 +33,11 @@ __revision__ = '$Format:%H$'
 from qgis.PyQt.QtCore import (QCoreApplication,
                               QVariant)
 from qgis.core import (QgsProcessing,
+                       QgsProcessingContext,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterVectorDestination,
                        QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterFileDestination,
                        QgsWkbTypes,
                        QgsProcessingParameterVectorLayer,
                        QgsProcessingParameterField,
@@ -52,6 +54,7 @@ from qgis.core import (QgsProcessing,
                        NULL)
 import processing
 import pandas as pd
+import csv
 
 
 class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
@@ -138,19 +141,26 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             
         # output table
         self.addParameter(
-            QgsProcessingParameterFeatureSink(
-                self.OUTPUT_TABLE, 
-                self.tr('Table with distances between points'),
-                )
+#            QgsProcessingParameterFeatureSink(
+#                self.OUTPUT_TABLE,
+#                self.tr('Table with distances between points'),
+#                type = QgsProcessing.TypeFile
+#            )
+            QgsProcessingParameterFileDestination(
+                    self.OUTPUT_TABLE,
+                    self.tr('Table with distances between points (CSV file)'),
+                    self.tr('CSV files (*.csv)'),
+                    optional = True
             )
+        )
         
         # ouput centerline layer, created if input is polygon
         self.addParameter(
             QgsProcessingParameterVectorDestination(
                 self.CENTERLINE_OUTPUT,
                 self.tr('Output centerline layer, can be created if input layer is polygon'),
-                defaultValue='', # ignore output by default
-                optional=True
+                defaultValue = '', # ignore output by default
+                optional = True
             )
         )
             
@@ -191,7 +201,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         fields = QgsFields()
         for fieldname, fieldtype in field_list:
             fields.append(QgsField(fieldname, fieldtype))
-        (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT_TABLE, context, fields, QgsWkbTypes.NoGeometry, QgsCoordinateReferenceSystem())
+        #(sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT_TABLE, context, fields, QgsWkbTypes.NoGeometry, QgsCoordinateReferenceSystem())
         
         # column names for future distance table
         # normally, same value for 1st and 2pt ids but sometimes an id is present in only one layer
@@ -199,10 +209,12 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         id2_colname = field_list[1][0] # ID of 2nd point
         dist_colname = field_list[2][0] # straight line distance between pair of points
         riverdist_colname = field_list[3][0] # along-river distance between pair of projected points
+        # get output path for future distance table as string
+        table_output_path = self.parameterAsOutputLayer(parameters, self.OUTPUT_TABLE, context)
         
         # check input parameters
         self.checkParameters(context, feedback)
-       
+        
         
         # 1/ PREPARATION : CREATE CENTERLINE IF NEEDED, MERGE LINES IN CENTERLINE IF NEEDED
         ####################################################################################
@@ -312,14 +324,22 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             return {}
         
         # do some treatments on dataframe
-        message = 'Some cosmetic on result dataframe...'
+        message = 'Rounding numbers and sorting lines by id in result dataframe...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        df_result = self.dfCalculations(df_result, 2, dist_colname, riverdist_colname, feedback)
+        df_result = self.dfCalculations(df_result, id1_colname, 2, dist_colname, riverdist_colname, feedback)
         
         # Then add dataframe to sink
         message = 'Saving dataframe to table...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        self.addFeaturestoSink(df_result, sink)
+        self.addFeaturestoTable(df_result, table_output_path)
+        
+        # load distance table in project
+        uri = 'file://' + table_output_path + '?delimiter=,'
+        table_layer = QgsVectorLayer(uri, "Distance table", "delimitedtext")
+        # with QgsProject.instance().addMapLayer layer is added but cannot be seen
+        # see https://gis.stackexchange.com/a/401802/175131
+        context.temporaryLayerStore().addMapLayer(table_layer)
+        context.addLayerToLoadOnCompletion(table_layer.id(), QgsProcessingContext.LayerDetails("", QgsProject.instance(), ""))
         
         
         # 5/ RETURN THE RESULTING TABLE AND LAYERS
@@ -329,12 +349,11 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         if river.geometryType() == QgsWkbTypes.PolygonGeometry :
             # don't know why exactly, but centerline layer must be removed so that it can be loaded automatically in qgis
             QgsProject.instance().removeMapLayer(centerline_layer)
-            return {self.OUTPUT_TABLE: dest_id, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2, self.CENTERLINE_OUTPUT: centerline}
+            return {self.OUTPUT_TABLE: table_output_path, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2, self.CENTERLINE_OUTPUT: centerline}
         # if no centerline generated :
         else:
             # return distance table and projected points layers
-            return {self.OUTPUT_TABLE: dest_id, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2}
-            #return {'df': df_result}
+            return {self.OUTPUT_TABLE: table_output_path, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2}
  
     
     # FUNCTIONS
@@ -401,15 +420,12 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
                             'INPUT_GEOMETRY_TYPE' : geom_type,
                             'OUTPUT' : output} # i.e. parameters[self.PROJECTED1] to output this layer in QGIS, else just a string
         # run executesql algorithm
-        feedback.pushInfo(QCoreApplication.translate('Distance along river', 'pip'))
         result = processing.run("qgis:executesql", executesql_param, is_child_algorithm=True, context=context, feedback=feedback)
-        #result = processing.runAndLoadResults("qgis:executesql", executesql_param, context=context, feedback=feedback)
-        feedback.pushInfo(QCoreApplication.translate('Distance along river', 'pap'))
         layer = result['OUTPUT']
         # Check for cancelation
         if feedback.isCanceled():
             return {}
-        # return projected points layer
+        # return result layer
         return layer
     
     # from one layer, create a dictionary with id values as keys and qgspoints as values
@@ -470,14 +486,18 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             
     
     # do some calculations on distances dataframe (round distances...)
-    def dfCalculations(self, df, decimal_count, dist_colname, riverdist_colname, feedback):
+    def dfCalculations(self, df, id1_colname, decimal_count, dist_colname, riverdist_colname, feedback):
         # 1/ round distances
         ###########################################
         # round column with straight line distances
         df[dist_colname] = df[dist_colname].apply(lambda x:round(float(x), decimal_count) if x != NULL else NULL)
         # round column with distances along river axis
         df[riverdist_colname] = df[riverdist_colname].apply(lambda x:round(float(x), decimal_count) if x != NULL else NULL)
-                
+        
+        # 2/ sort lines by point id
+        ###########################################
+        #df = df.sort_values(by=[id1_colname], key=lambda x: np.argsort(index_natsorted(df[id1_colname])))
+        
         return df
     
     # given a dataframe and the output table, add each line of dataframe to table
@@ -492,8 +512,10 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             f.setAttributes(l)
             # and add feature to table
             table.addFeature(f)
-        
-    
+            
+    # given a dataframe and the output table, write dataframe to table       
+    def addFeaturestoTable(self, df, output_path):
+        df.to_csv(output_path, index=False)  
 
     def name(self):
         """
