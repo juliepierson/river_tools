@@ -141,11 +141,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             
         # output table
         self.addParameter(
-#            QgsProcessingParameterFeatureSink(
-#                self.OUTPUT_TABLE,
-#                self.tr('Table with distances between points'),
-#                type = QgsProcessing.TypeFile
-#            )
             QgsProcessingParameterFileDestination(
                     self.OUTPUT_TABLE,
                     self.tr('Table with distances between points (CSV file)'),
@@ -201,7 +196,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         fields = QgsFields()
         for fieldname, fieldtype in field_list:
             fields.append(QgsField(fieldname, fieldtype))
-        #(sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT_TABLE, context, fields, QgsWkbTypes.NoGeometry, QgsCoordinateReferenceSystem())
         
         # column names for future distance table
         # normally, same value for 1st and 2pt ids but sometimes an id is present in only one layer
@@ -500,18 +494,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         
         return df
     
-    # given a dataframe and the output table, add each line of dataframe to table
-    def addFeaturestoSink(self, df, table):
-        # for each row in dataframe
-        for i in range(len(df.index)):
-            row = df.iloc[i]
-            # create list from line
-            l = row.tolist()
-            # add it to feature
-            f = QgsFeature()
-            f.setAttributes(l)
-            # and add feature to table
-            table.addFeature(f)
             
     # given a dataframe and the output table, write dataframe to table       
     def addFeaturestoTable(self, df, output_path):
