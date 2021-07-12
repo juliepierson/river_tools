@@ -250,7 +250,7 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # get names or full path for 2nd point layer and centerline
         layer_list2 = [input2, centerline_layer]
         call_layer_list2 = self.callableLayers(layer_list2, feedback)
-        # Second input layer
+        # projecting points for 2nd point layer
         message = 'Projecting 2nd input layer on river...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
         layer_projected2 = self.projectPoints(layer_list2, call_layer_list2, projected2, [idfield2], context, feedback)
@@ -308,7 +308,11 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         self.addFeaturestoTable(df_result, table_output_path)
         
         # load distance table in project
-        uri = 'file://' + table_output_path + '?delimiter=,'
+        if table_output_path.startswith('/'): # linux
+            prefix = 'file://'
+        else: # windows
+            prefix = 'file:///'
+        uri = prefix + table_output_path + '?delimiter=,'
         table_layer = QgsVectorLayer(uri, "Distance table", "delimitedtext")
         # with QgsProject.instance().addMapLayer layer is added but cannot be seen
         # see https://gis.stackexchange.com/a/401802/175131
@@ -327,7 +331,8 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # if no centerline generated :
         else:
             # return distance table and projected points layers
-            return {self.OUTPUT_TABLE: table_output_path, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2}
+            #return {self.OUTPUT_TABLE: table_output_path, self.PROJECTED1: layer_projected1, self.PROJECTED2: layer_projected2}
+            return {self.OUTPUT_TABLE: table_output_path}
  
     
     # FUNCTIONS
