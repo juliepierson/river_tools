@@ -187,6 +187,8 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         river = self.parameterAsVectorLayer(parameters, self.RIVER, context)
         projected1 = self.parameterAsOutputLayer(parameters, self.PROJECTED1, context)
         projected2 = self.parameterAsOutputLayer(parameters, self.PROJECTED2, context)
+        # get output path for future distance table as string
+        table_output_path = self.parameterAsOutputLayer(parameters, self.OUTPUT_TABLE, context)
         # before creating output distance table, its fields must be defined
         #field_list = [['ID1', QVariant.Int], ['ID2', QVariant.Int], ['straight_dist', QVariant.Double], ['river_dist', QVariant.Double]]
         field_list = [['ID1', QVariant.String], ['ID2', QVariant.String], ['straight_dist', QVariant.Double], ['river_dist', QVariant.Double]]
@@ -200,8 +202,6 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         id2_colname = field_list[1][0] # ID of 2nd point
         dist_colname = field_list[2][0] # straight line distance between pair of points
         riverdist_colname = field_list[3][0] # along-river distance between pair of projected points
-        # get output path for future distance table as string
-        table_output_path = self.parameterAsOutputLayer(parameters, self.OUTPUT_TABLE, context)
         
         # check input parameters
         self.checkParameters(context, feedback)
@@ -239,38 +239,21 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
         # 2/ PROJECT POINTS FROM INPUT LAYERS ON RIVER CENTERLINE
         ####################################################################################
         
+        # get names or full path for 1st point layer and centerline
+        layer_list1 = [input1, centerline_layer]
+        call_layer_list1 = self.callableLayers(layer_list1, feedback)
+        # projecting points for 1st point layer
         message = 'Projecting 1st input layer on river...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        # get names or full path for 1st point layer and centerline
-        layer_list = [input1, centerline_layer]
-        call_layer_list = self.callableLayers(layer_list, feedback)
-        # id field is also needed
-        field_list = [idfield1]
-        # SQL query to get endpoints of shortest lines between points and river centerline
-        query = f"""SELECT st_endpoint(ST_ShortestLine(p.geometry, l.geometry)) as geometry,
-                    p.{field_list[0]},
-                    ROUND(ST_Length(ST_ShortestLine(p.geometry, l.geometry)), 6) AS distance
-                    FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
-        # run this query to create 1st projected point layer
-        layer_projected1 = self.runSqlQuery(layer_list, field_list, query, 0, projected1, context, feedback)
-        layer_projected1 = QgsProcessingUtils.mapLayerFromString(layer_projected1, context)
+        layer_projected1 = self.projectPoints(layer_list1, call_layer_list1, projected1, [idfield1], context, feedback)
         
+        # get names or full path for 2nd point layer and centerline
+        layer_list2 = [input2, centerline_layer]
+        call_layer_list2 = self.callableLayers(layer_list2, feedback)
+        # Second input layer
         message = 'Projecting 2nd input layer on river...'
         feedback.pushInfo(QCoreApplication.translate('Distance along river', message))
-        # get names or full path for 2nd point layer and centerline
-        layer_list = [input2, centerline_layer]
-        call_layer_list = self.callableLayers(layer_list, feedback)
-        # id field is also needed
-        field_list = [idfield2]
-        # SQL query to get endpoints of shortest lines between points and river centerline
-        query = f"""SELECT st_endpoint(ST_ShortestLine(p.geometry, l.geometry)) as geometry,
-                    p.{field_list[0]},
-                    ROUND(ST_Length(ST_ShortestLine(p.geometry, l.geometry)), 6) AS distance
-                    FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
-        # run this query to create 2nd projected point layer
-        layer_projected2 = self.runSqlQuery(layer_list, field_list, query, 0, projected2, context, feedback)
-        feedback.pushInfo(QCoreApplication.translate('Distance along river', layer_projected2))
-        layer_projected2 = QgsProcessingUtils.mapLayerFromString(layer_projected2, context)
+        layer_projected2 = self.projectPoints(layer_list2, call_layer_list2, projected2, [idfield2], context, feedback)
         
         
         # 3/ CALCULATE DISTANCES BETWEEN INPUT POINTS, AND BETWEEN PROJECTED POINTS
@@ -401,6 +384,17 @@ class DistanceAlongRiverAlgorithm(QgsProcessingAlgorithm):
             else:
                 call_layer_list.append(layer.source())
         return call_layer_list
+    
+    def projectPoints(self, layer_list, call_layer_list, projected, field_list, context, feedback):
+        # SQL query to get endpoints of shortest lines between points and river centerline
+        query = f"""SELECT st_endpoint(ST_ShortestLine(p.geometry, l.geometry)) as geometry,
+                    p.{field_list[0]},
+                    ROUND(ST_Length(ST_ShortestLine(p.geometry, l.geometry)), 6) AS distance
+                    FROM "{call_layer_list[0]}" AS p, "{call_layer_list[1]}" AS l"""
+        # run this query to create 1st projected point layer
+        layer_projected = self.runSqlQuery(layer_list, field_list, query, 0, projected, context, feedback)
+        layer_projected = QgsProcessingUtils.mapLayerFromString(layer_projected, context)
+        return layer_projected
     
     # run a sql query given a query, list of layers and list of field, layers must be names or sources (full paths)
     # geom_type : geometry type for resulting layer, 0 for autodetect, 1 for no geometry (cf. alghelp for more)
